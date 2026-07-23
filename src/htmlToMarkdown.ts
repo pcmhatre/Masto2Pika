@@ -14,6 +14,15 @@ turndown.addRule("mastodonCustomEmoji", {
   replacement: (_content, node) => (node as HTMLElement).getAttribute("alt") ?? "",
 });
 
+// Mastodon prepends a `RE: <link>` paragraph to quote-post content for
+// clients that don't understand the `quote` field. buildQuoteBlock already
+// renders the quoted post and its link, so this is redundant — drop it.
+turndown.addRule("mastodonQuoteInlineLink", {
+  filter: (node) =>
+    node.nodeName === "P" && (node as HTMLElement).classList?.contains("quote-inline"),
+  replacement: () => "",
+});
+
 export function htmlToMarkdown(html: string): string {
   return turndown.turndown(html).trim();
 }
