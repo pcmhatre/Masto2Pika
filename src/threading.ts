@@ -10,6 +10,10 @@ export type ThreadDecision =
   | { kind: "continuation"; pikaUrl: string }
   | { kind: "skip"; reason: string };
 
+// Content containing any of these is never crossposted, regardless of
+// whether it would otherwise be a new post or a thread continuation.
+const EXCLUDED_CONTENT = ["[REDACTED-EMOJI]"];
+
 /**
  * Decides whether a status should become a new Pika post, be appended to an
  * existing thread's Pika post, or be skipped entirely.
@@ -25,6 +29,10 @@ export function classify(
   threads: Record<string, string>,
 ): ThreadDecision {
   if (status.reblog) return { kind: "skip", reason: "boost" };
+
+  if (EXCLUDED_CONTENT.some((needle) => status.content.includes(needle))) {
+    return { kind: "skip", reason: "excluded content" };
+  }
 
   if (!status.in_reply_to_id) return { kind: "new-root" };
 

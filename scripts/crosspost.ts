@@ -158,7 +158,7 @@ async function main() {
     const content = buildContentMarkdown(status);
 
     if (decision.kind === "new-root") {
-      const category = extractHashtags(status);
+      const category = [...extractHashtags(status), "Micro"];
       if (DRY_RUN) {
         console.log("  [dry-run] would create post:", JSON.stringify({ content, photos, category, published: status.created_at }, null, 2));
         threadsWorking[status.id] = `dry-run://${status.id}`;
