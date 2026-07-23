@@ -1,8 +1,9 @@
 name: Crosspost Mastodon to Pika
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
+  # Triggered by the Cloudflare Worker in cron-trigger/ on a real */15 min
+  # schedule — GitHub's own `schedule:` trigger proved too unreliable here
+  # (only fired a couple of times over several hours).
   workflow_dispatch: {}
 
 permissions:
