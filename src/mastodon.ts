@@ -5,6 +5,26 @@ export interface MastodonMediaAttachment {
   description: string | null;
 }
 
+export interface MastodonQuotedStatus {
+  content: string;
+  url: string;
+  account: { acct: string };
+}
+
+export interface MastodonQuote {
+  state:
+    | "pending"
+    | "accepted"
+    | "rejected"
+    | "revoked"
+    | "deleted"
+    | "unauthorized"
+    | "blocked_account"
+    | "blocked_domain"
+    | "muted_account";
+  quoted_status: MastodonQuotedStatus | null;
+}
+
 export interface MastodonStatus {
   id: string;
   created_at: string;
@@ -15,6 +35,7 @@ export interface MastodonStatus {
   reblog: unknown | null;
   media_attachments: MastodonMediaAttachment[];
   tags: { name: string }[];
+  quote?: MastodonQuote | null;
 }
 
 export interface MastodonConfig {
