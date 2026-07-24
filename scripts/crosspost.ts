@@ -1,4 +1,3 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,11 +13,11 @@ import {
   type PikaConfig,
   type PikaPhoto,
 } from "../src/pika.js";
-import { classify, type ThreadState } from "../src/threading.js";
+import { classify } from "../src/threading.js";
+import { loadState, saveState, type KvConfig } from "../src/state.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
-const STATE_PATH = path.join(ROOT, "state", "thread-map.json");
 
 const args = new Set(process.argv.slice(2));
 const DRY_RUN = args.has("--dry-run");
@@ -57,18 +56,18 @@ const pikaConfig: PikaConfig = {
   token: requireEnv("PIKA_TOKEN"),
 };
 
-async function loadState(): Promise<ThreadState> {
-  if (!existsSync(STATE_PATH)) {
-    return { lastProcessedId: null, threads: {} };
-  }
-  const raw = await readFile(STATE_PATH, "utf8");
-  return JSON.parse(raw) as ThreadState;
-}
+const kvConfig: KvConfig = {
+  accountId: requireEnv("CLOUDFLARE_ACCOUNT_ID"),
+  namespaceId: requireEnv("CLOUDFLARE_KV_NAMESPACE_ID"),
+  apiToken: requireEnv("CLOUDFLARE_API_TOKEN"),
+};
 
-async function saveState(state: ThreadState): Promise<void> {
-  await mkdir(path.dirname(STATE_PATH), { recursive: true });
-  await writeFile(STATE_PATH, JSON.stringify(state, null, 2) + "\n", "utf8");
-}
+// Substrings (domains, emoji, etc.) that exclude a toot from crossposting.
+// Kept out of source deliberately — set as a JSON array in the
+// EXCLUDED_CONTENT secret so specific exclusions aren't publicly visible.
+const excludedContent: string[] = process.env.EXCLUDED_CONTENT
+  ? (JSON.parse(process.env.EXCLUDED_CONTENT) as string[])
+  : [];
 
 /** Latest existing status id, used to seed state on first run without backfilling. */
 async function peekLatestStatusId(config: MastodonConfig): Promise<string | undefined> {
@@ -120,12 +119,12 @@ async function uploadStatusImages(status: MastodonStatus): Promise<PikaPhoto[]> 
 }
 
 async function main() {
-  const state = await loadState();
+  const state = await loadState(kvConfig);
 
   if (state.lastProcessedId === null && !BACKFILL) {
     const latestId = await peekLatestStatusId(mastodonConfig);
     if (!DRY_RUN) {
-      await saveState({ lastProcessedId: latestId ?? "0", threads: {} });
+      await saveState(kvConfig, { lastProcessedId: latestId ?? "0", threads: {} });
     }
     console.log(
       `First run: initialized cursor to status ${latestId ?? "(none)"} without backfilling. ` +
@@ -146,7 +145,7 @@ async function main() {
   let lastProcessedId = state.lastProcessedId;
 
   for (const status of statuses) {
-    const decision = classify(status, mastodonConfig.accountId, threadsWorking);
+    const decision = classify(status, mastodonConfig.accountId, threadsWorking, excludedContent);
     console.log(`Status ${status.id}: ${decision.kind}${"reason" in decision ? ` (${decision.reason})` : ""}`);
 
     if (decision.kind === "skip") {
@@ -193,9 +192,9 @@ async function main() {
   }
 
   if (!DRY_RUN) {
-    await saveState({ lastProcessedId, threads: threadsWorking });
+    await saveState(kvConfig, { lastProcessedId, threads: threadsWorking });
   } else {
-    console.log("[dry-run] state file not written.");
+    console.log("[dry-run] state not written.");
   }
 }
 

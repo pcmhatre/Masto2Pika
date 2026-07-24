@@ -10,7 +10,7 @@ Built for a "Followers only" posting habit: reading followers-only content requi
 - **Self-threads are stitched together**: a reply to your own previous toot is appended to the *same* Pika post (via Micropub's `q=source` + `action=update`) instead of becoming a separate post.
 - **Native quote posts** (Mastodon 4.4+) are rendered as a Markdown blockquote with attribution, since the quoted content lives in a separate `quote` field, not in `content`. Mastodon's redundant `RE: <link>` courtesy paragraph is stripped.
 - Images are downloaded from Mastodon and re-uploaded to Pika's media endpoint, so posts don't depend on the original toot still existing.
-- Posts containing [REDACTED-EMOJI] are excluded entirely (see `EXCLUDED_CONTENT` in `src/threading.ts`).
+- Posts matching a configurable exclusion list (domains, emoji, etc. — see `EXCLUDED_CONTENT` below) are skipped entirely.
 - New posts are tagged `"Micro"` on Pika, alongside any hashtags from the toot.
 
 ## Architecture
@@ -24,11 +24,13 @@ Two parts:
 Cloudflare Worker (real cron, every 15 min)
   → POST GitHub Actions workflow-dispatch API
     → crosspost.yml runs scripts/crosspost.ts
-      → reads state/thread-map.json (last synced status ID, thread → Pika URL map)
+      → reads state from Cloudflare KV (last synced status ID, thread → Pika URL map)
       → fetches new Mastodon statuses
       → creates/updates Pika posts via Micropub
-      → commits updated state/thread-map.json back to the repo
+      → writes updated state back to Cloudflare KV
 ```
+
+State (which post maps to which Pika URL, and any configured content exclusions) lives in Cloudflare, not in this repo — see [State](#state) and [Excluding content](#excluding-content) below.
 
 ## Setup
 
@@ -55,12 +57,27 @@ Required env vars (see `.env.example`):
 - `MASTODON_ACCESS_TOKEN`
 - `MASTODON_ACCOUNT_ID`
 - `PIKA_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_KV_NAMESPACE_ID`
+- `CLOUDFLARE_API_TOKEN` (scoped to Account → Workers KV Storage → Edit)
+
+Optional: `EXCLUDED_CONTENT` — see [Excluding content](#excluding-content).
 
 Flags: `--dry-run` (log what would happen, never write state or post anything), `--backfill` (on first run, process existing history instead of just seeding the cursor to "now").
 
 ### GitHub Actions
 
-Set the same four values as repository secrets (Settings → Secrets and variables → Actions). The workflow only runs on `workflow_dispatch` — it needs something to dispatch it, which is the Cloudflare Worker below.
+Set the same values as repository secrets (Settings → Secrets and variables → Actions). The workflow only runs on `workflow_dispatch` — it needs something to dispatch it, which is the Cloudflare Worker below.
+
+### Cloudflare KV (state storage)
+
+```bash
+cd cron-trigger
+npx wrangler login
+npx wrangler kv namespace create masto2pika_state   # note the returned namespace id
+```
+
+Create an API token at dash.cloudflare.com/profile/api-tokens scoped to Account → Workers KV Storage → Edit, then set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_KV_NAMESPACE_ID`, and `CLOUDFLARE_API_TOKEN` locally (`.env`) and as GitHub Actions secrets.
 
 ### Cloudflare Worker (the cron trigger)
 
@@ -80,9 +97,19 @@ https://<worker-subdomain>.workers.dev/?secret=<TRIGGER_SECRET>
 
 ## State
 
-`state/thread-map.json` tracks the last processed Mastodon status ID and a map of `mastodon_status_id → pika_post_url` for stitching thread replies. It's committed back to the repo by the GitHub Actions workflow after each run.
+The last processed Mastodon status ID and a map of `mastodon_status_id → pika_post_url` (for stitching thread replies) are stored in a Cloudflare KV namespace, read/written by `src/state.ts` via Cloudflare's REST API. This is deliberately *not* committed to the repo — it would otherwise expose which blog domain posts land on and the IDs of followers-only toots.
 
 If a toot's root predates this tool's first run (or was itself skipped), replies to it won't be stitched — there's no Pika post on record to append to.
+
+## Excluding content
+
+`src/threading.ts`'s `classify()` takes an `excludedContent: string[]` parameter — any toot whose content contains one of these substrings (a domain, an emoji, anything) is skipped entirely, whether it would otherwise be a new post or a thread continuation. The actual list is never hardcoded in source; `scripts/crosspost.ts` reads it at runtime from the `EXCLUDED_CONTENT` env var as a JSON array, e.g.:
+
+```
+EXCLUDED_CONTENT=["[REDACTED-EMOJI]","https://example.com/"]
+```
+
+Set this as a GitHub Actions secret (and locally in `.env` if needed) rather than committing it, so the specific exclusions stay private even if this repo is public.
 
 ## Troubleshooting
 
