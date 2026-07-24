@@ -4,7 +4,18 @@ on:
   # Triggered by the Cloudflare Worker in cron-trigger/ on a real */15 min
   # schedule — GitHub's own `schedule:` trigger proved too unreliable here
   # (only fired a couple of times over several hours).
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no posts/writes)"
+        required: false
+        type: boolean
+        default: false
+      backfill:
+        description: "Backfill (process full history instead of just new statuses) — only meaningful with dry_run"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: crosspost
@@ -22,7 +33,7 @@ jobs:
 
       - run: npm ci
 
-      - run: npm run crosspost
+      - run: npm run crosspost -- ${{ inputs.dry_run && '--dry-run' || '' }} ${{ inputs.backfill && '--backfill' || '' }}
         env:
           MASTODON_INSTANCE_URL: ${{ secrets.MASTODON_INSTANCE_URL }}
           MASTODON_ACCESS_TOKEN: ${{ secrets.MASTODON_ACCESS_TOKEN }}
