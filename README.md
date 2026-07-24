@@ -45,7 +45,7 @@ Create an app token (Settings → App tokens).
 ### Local development
 
 ```bash
-cp .env.example .env   # fill in the four values below
+cp .env.example .env   # fill in the values below
 npm install
 npm run crosspost:dry  # preview without posting anything
 npm run crosspost      # run for real
@@ -106,7 +106,7 @@ If a toot's root predates this tool's first run (or was itself skipped), replies
 `src/threading.ts`'s `classify()` takes an `excludedContent: string[]` parameter — any toot whose content contains one of these substrings (a domain, an emoji, anything) is skipped entirely, whether it would otherwise be a new post or a thread continuation. The actual list is never hardcoded in source; `scripts/crosspost.ts` reads it at runtime from the `EXCLUDED_CONTENT` env var as a JSON array, e.g.:
 
 ```
-EXCLUDED_CONTENT=["[REDACTED-EMOJI]","https://example.com/"]
+EXCLUDED_CONTENT=["🚫","https://example.com/"]
 ```
 
 Set this as a GitHub Actions secret (and locally in `.env` if needed) rather than committing it, so the specific exclusions stay private even if this repo is public.
