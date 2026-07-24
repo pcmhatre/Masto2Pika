@@ -12,7 +12,7 @@ export type ThreadDecision =
 
 // Content containing any of these is never crossposted, regardless of
 // whether it would otherwise be a new post or a thread continuation.
-const EXCLUDED_CONTENT = ["[REDACTED-EMOJI]"];
+const EXCLUDED_CONTENT = ["[REDACTED-EMOJI]", "https://REDACTED-DOMAIN.example/"];
 
 /**
  * Decides whether a status should become a new Pika post, be appended to an
