@@ -24,7 +24,18 @@ export type ThreadDecision =
  * regardless of whether it would otherwise be a new post or a continuation.
  * Kept out of source so the specific list can live in a secret rather than
  * be publicly visible in this repo.
+ *
+ * Statuses that visually start with a mention (`@user ...`) but aren't
+ * actually flagged as a reply (in_reply_to_id is null — e.g. typed manually
+ * rather than via the reply button) are also skipped. This check is scoped
+ * to that not-technically-a-reply case only, so it can't interfere with
+ * genuine self-reply thread continuations, which sometimes also render
+ * with a leading mention.
  */
+function startsWithMention(html: string): boolean {
+  return html.replace(/<[^>]+>/g, "").trimStart().startsWith("@");
+}
+
 export function classify(
   status: MastodonStatus,
   ownAccountId: string,
@@ -37,7 +48,12 @@ export function classify(
     return { kind: "skip", reason: "excluded content" };
   }
 
-  if (!status.in_reply_to_id) return { kind: "new-root" };
+  if (!status.in_reply_to_id) {
+    if (startsWithMention(status.content)) {
+      return { kind: "skip", reason: "starts with a mention but isn't marked as a reply" };
+    }
+    return { kind: "new-root" };
+  }
 
   if (status.in_reply_to_account_id !== ownAccountId) {
     return { kind: "skip", reason: "reply to another account" };
