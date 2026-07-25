@@ -46,6 +46,21 @@ export interface MastodonConfig {
 
 const PAGE_LIMIT = 40;
 
+async function fetchPage(
+  base: string,
+  config: MastodonConfig,
+  params: URLSearchParams,
+): Promise<MastodonStatus[]> {
+  const url = `${base}/api/v1/accounts/${config.accountId}/statuses?${params}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${config.accessToken}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Mastodon statuses fetch failed: ${res.status} ${await res.text()}`);
+  }
+  return (await res.json()) as MastodonStatus[];
+}
+
 /**
  * Fetches all statuses newer than minId, oldest-first. Boosts are excluded
  * server-side; replies are NOT excluded here because self-thread replies
@@ -58,35 +73,49 @@ export async function fetchNewStatuses(
   const base = config.instanceUrl.replace(/\/+$/, "");
   const collected: MastodonStatus[] = [];
 
-  // Mastodon's min_id pagination walks backward from the newest page, so we
-  // page until no more results come back, then sort ascending ourselves.
-  let maxId: string | undefined;
+  if (minId) {
+    // Resuming from a cursor: each page is anchored near min_id and
+    // returned newest-first, so the next page's floor is this page's
+    // newest id — walk forward toward "now" until a short page confirms
+    // we've caught up.
+    let cursor = minId;
+    for (;;) {
+      const params = new URLSearchParams({
+        exclude_reblogs: "true",
+        limit: String(PAGE_LIMIT),
+        min_id: cursor,
+      });
+      const page = await fetchPage(base, config, params);
+      if (page.length === 0) break;
 
-  for (;;) {
-    const params = new URLSearchParams({
-      exclude_reblogs: "true",
-      limit: String(PAGE_LIMIT),
-    });
-    if (minId) params.set("min_id", minId);
-    if (maxId) params.set("max_id", maxId);
+      collected.push(...page);
+      if (page.length < PAGE_LIMIT) break;
 
-    const url = `${base}/api/v1/accounts/${config.accountId}/statuses?${params}`;
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${config.accessToken}` },
-    });
-    if (!res.ok) {
-      throw new Error(`Mastodon statuses fetch failed: ${res.status} ${await res.text()}`);
+      const newest = page[0];
+      if (!newest) break;
+      cursor = newest.id;
     }
-    const page = (await res.json()) as MastodonStatus[];
-    if (page.length === 0) break;
+  } else {
+    // No floor (true from-scratch backfill): start at "now" and walk
+    // backward through full history via max_id.
+    let maxId: string | undefined;
+    for (;;) {
+      const params = new URLSearchParams({
+        exclude_reblogs: "true",
+        limit: String(PAGE_LIMIT),
+      });
+      if (maxId) params.set("max_id", maxId);
 
-    collected.push(...page);
-    if (page.length < PAGE_LIMIT) break;
+      const page = await fetchPage(base, config, params);
+      if (page.length === 0) break;
 
-    // Page backward: next page's max_id is the oldest id seen so far minus one.
-    const oldest = page[page.length - 1];
-    maxId = oldest ? String(BigInt(oldest.id) - 1n) : undefined;
-    if (!maxId) break;
+      collected.push(...page);
+      if (page.length < PAGE_LIMIT) break;
+
+      const oldest = page[page.length - 1];
+      if (!oldest) break;
+      maxId = String(BigInt(oldest.id) - 1n);
+    }
   }
 
   return collected.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
