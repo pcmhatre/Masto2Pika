@@ -69,6 +69,10 @@ const excludedContent: string[] = process.env.EXCLUDED_CONTENT
   ? (JSON.parse(process.env.EXCLUDED_CONTENT) as string[])
   : [];
 
+// Minimum visible-character length for a status to become a new post (0 =
+// no minimum). Kept out of source for the same reason as EXCLUDED_CONTENT.
+const minContentLength = process.env.MIN_CONTENT_LENGTH ? Number(process.env.MIN_CONTENT_LENGTH) : 0;
+
 /** Latest existing status id, used to seed state on first run without backfilling. */
 async function peekLatestStatusId(config: MastodonConfig): Promise<string | undefined> {
   const base = config.instanceUrl.replace(/\/+$/, "");
@@ -145,7 +149,7 @@ async function main() {
   let lastProcessedId = state.lastProcessedId;
 
   for (const status of statuses) {
-    const decision = classify(status, mastodonConfig.accountId, threadsWorking, excludedContent);
+    const decision = classify(status, mastodonConfig.accountId, threadsWorking, excludedContent, minContentLength);
     console.log(`Status ${status.id}: ${decision.kind}${"reason" in decision ? ` (${decision.reason})` : ""}`);
 
     if (decision.kind === "skip") {

@@ -27,13 +27,19 @@ export type ThreadDecision =
  *
  * Statuses that visually start with a mention (`@user ...`) but aren't
  * actually flagged as a reply (in_reply_to_id is null — e.g. typed manually
- * rather than via the reply button) are also skipped. This check is scoped
- * to that not-technically-a-reply case only, so it can't interfere with
- * genuine self-reply thread continuations, which sometimes also render
- * with a leading mention.
+ * rather than via the reply button) are also skipped, as are ones shorter
+ * than `minContentLength` visible characters. Both checks are scoped to
+ * that not-technically-a-reply case only, so neither can interfere with
+ * genuine self-reply thread continuations — a short reply extending an
+ * existing thread is still worth appending even if a fresh short toot
+ * wouldn't be worth a new post on its own.
  */
 function startsWithMention(html: string): boolean {
   return html.replace(/<[^>]+>/g, "").trimStart().startsWith("@");
+}
+
+function plainTextLength(html: string): number {
+  return html.replace(/<[^>]+>/g, "").trim().length;
 }
 
 export function classify(
@@ -41,6 +47,7 @@ export function classify(
   ownAccountId: string,
   threads: Record<string, string>,
   excludedContent: string[],
+  minContentLength: number,
 ): ThreadDecision {
   if (status.reblog) return { kind: "skip", reason: "boost" };
 
@@ -51,6 +58,9 @@ export function classify(
   if (!status.in_reply_to_id) {
     if (startsWithMention(status.content)) {
       return { kind: "skip", reason: "starts with a mention but isn't marked as a reply" };
+    }
+    if (minContentLength > 0 && plainTextLength(status.content) <= minContentLength) {
+      return { kind: "skip", reason: `content is ${minContentLength} characters or shorter` };
     }
     return { kind: "new-root" };
   }
