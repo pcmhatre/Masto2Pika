@@ -33,6 +33,13 @@ export type ThreadDecision =
  * genuine self-reply thread continuations — a short reply extending an
  * existing thread is still worth appending even if a fresh short toot
  * wouldn't be worth a new post on its own.
+ *
+ * The length check only measures `status.content` (the toot's own text),
+ * which for a native quote-post is just the quoter's own commentary — the
+ * quoted content lives separately in `status.quote` and isn't counted here.
+ * Quote-posts are exempt from the length check entirely, since even brief
+ * commentary produces a substantial crossposted result once the quoted
+ * post is rendered alongside it.
  */
 function startsWithMention(html: string): boolean {
   return html.replace(/<[^>]+>/g, "").trimStart().startsWith("@");
@@ -59,7 +66,11 @@ export function classify(
     if (startsWithMention(status.content)) {
       return { kind: "skip", reason: "starts with a mention but isn't marked as a reply" };
     }
-    if (minContentLength > 0 && plainTextLength(status.content) <= minContentLength) {
+    if (
+      !status.quote &&
+      minContentLength > 0 &&
+      plainTextLength(status.content) <= minContentLength
+    ) {
       return { kind: "skip", reason: `content is ${minContentLength} characters or shorter` };
     }
     return { kind: "new-root" };
