@@ -39,7 +39,11 @@ export type ThreadDecision =
  * quoted content lives separately in `status.quote` and isn't counted here.
  * Quote-posts are exempt from the length check entirely, since even brief
  * commentary produces a substantial crossposted result once the quoted
- * post is rendered alongside it.
+ * post is rendered alongside it. Toots containing a YouTube link are
+ * exempt too, for the same reason (the embedded video is the substance,
+ * not the caption) — this one's a structural rule, not a private
+ * preference, so it's hardcoded rather than going through
+ * `excludedContent`.
  */
 function startsWithMention(html: string): boolean {
   return html.replace(/<[^>]+>/g, "").trimStart().startsWith("@");
@@ -47,6 +51,10 @@ function startsWithMention(html: string): boolean {
 
 function plainTextLength(html: string): number {
   return html.replace(/<[^>]+>/g, "").trim().length;
+}
+
+function containsYouTubeLink(html: string): boolean {
+  return /youtube\.com|youtu\.be/i.test(html);
 }
 
 export function classify(
@@ -68,6 +76,7 @@ export function classify(
     }
     if (
       !status.quote &&
+      !containsYouTubeLink(status.content) &&
       minContentLength > 0 &&
       plainTextLength(status.content) <= minContentLength
     ) {
