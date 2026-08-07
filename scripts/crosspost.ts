@@ -94,8 +94,14 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   avif: "image/avif",
 };
 
+// Mastodon reports an attachment's type as "unknown" while it's still being
+// processed server-side, before resolving to "image"/"video"/etc. A status
+// fetched in that window has real media (media_attachments is non-empty)
+// but would be silently skipped by a strict `type === "image"` filter —
+// the download itself works fine regardless of Mastodon's own classification
+// state, so treat "unknown" as a candidate image too.
 async function uploadStatusImages(status: MastodonStatus): Promise<PikaPhoto[]> {
-  const images = status.media_attachments.filter((m) => m.type === "image");
+  const images = status.media_attachments.filter((m) => m.type === "image" || m.type === "unknown");
   const photos: PikaPhoto[] = [];
 
   for (const media of images) {
@@ -104,8 +110,15 @@ async function uploadStatusImages(status: MastodonStatus): Promise<PikaPhoto[]> 
       console.warn(`  ! failed to download media ${media.url}: ${res.status}`);
       continue;
     }
-    const bytes = Buffer.from(await res.arrayBuffer());
     const contentType = res.headers.get("content-type") ?? "image/jpeg";
+    // "unknown" attachments can turn out to be video/audio still processing,
+    // not an image — Pika's media endpoint only accepts image types, so skip
+    // anything that didn't actually download as one.
+    if (media.type === "unknown" && !contentType.startsWith("image/")) {
+      console.warn(`  ! skipping non-image "unknown" attachment ${media.url} (${contentType})`);
+      continue;
+    }
+    const bytes = Buffer.from(await res.arrayBuffer());
     const ext = Object.entries(IMAGE_MIME_BY_EXT).find(([, mime]) => mime === contentType)?.[0] ?? "jpg";
     const filename = `${media.id}.${ext}`;
 
