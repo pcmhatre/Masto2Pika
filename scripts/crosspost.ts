@@ -94,6 +94,18 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   avif: "image/avif",
 };
 
+// Pika's Micropub endpoint rejects the entire post with a misleading 422
+// "Body can't be blank" whenever a photo's alt text contains a literal `"`
+// character (confirmed by bisecting a real failure — length isn't the
+// trigger, only embedded double quotes are). Mastodon's own alt text
+// regularly contains quotes (e.g. quoting a title or speech), so this
+// works around it by swapping straight double quotes for single quotes
+// rather than losing alt text entirely.
+function sanitizeAlt(description: string | null): string | undefined {
+  if (!description) return undefined;
+  return description.replace(/"/g, "'");
+}
+
 // Mastodon reports an attachment's type as "unknown" while it's still being
 // processed server-side, before resolving to "image"/"video"/etc. A status
 // fetched in that window has real media (media_attachments is non-empty)
@@ -122,14 +134,16 @@ async function uploadStatusImages(status: MastodonStatus): Promise<PikaPhoto[]> 
     const ext = Object.entries(IMAGE_MIME_BY_EXT).find(([, mime]) => mime === contentType)?.[0] ?? "jpg";
     const filename = `${media.id}.${ext}`;
 
+    const alt = sanitizeAlt(media.description);
+
     if (DRY_RUN) {
       console.log(`  [dry-run] would upload media ${media.url} (${contentType}, ${bytes.length} bytes)`);
-      photos.push({ value: media.url, alt: media.description ?? undefined });
+      photos.push({ value: media.url, alt });
       continue;
     }
 
     const location = await uploadMedia(pikaConfig, bytes, contentType, filename);
-    photos.push({ value: location, alt: media.description ?? undefined });
+    photos.push({ value: location, alt });
   }
 
   return photos;
