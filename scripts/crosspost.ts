@@ -160,6 +160,7 @@ async function main() {
 
   const threadsWorking: Record<string, string> = { ...state.threads };
   let lastProcessedId = state.lastProcessedId;
+  let hadFailure = false;
 
   for (const status of statuses) {
     const decision = classify(status, mastodonConfig.accountId, threadsWorking, excludedContent, minContentLength);
@@ -170,39 +171,51 @@ async function main() {
       continue;
     }
 
-    const photos = await uploadStatusImages(status);
-    const content = buildContentMarkdown(status);
+    // A failure partway through a batch must not lose track of what already
+    // succeeded earlier in the same batch (which would cause it to be
+    // re-created/re-updated, i.e. duplicated, on the next run) — so state is
+    // saved up through the last success and processing stops there. Since
+    // lastProcessedId isn't advanced past the failed status, it's simply
+    // retried on the next run, which is correct for a transient failure.
+    try {
+      const photos = await uploadStatusImages(status);
+      const content = buildContentMarkdown(status);
 
-    if (decision.kind === "new-root") {
-      const category = [...extractHashtags(status), "Micro"];
-      if (DRY_RUN) {
-        console.log("  [dry-run] would create post:", JSON.stringify({ content, photos, category, published: status.created_at }, null, 2));
-        threadsWorking[status.id] = `dry-run://${status.id}`;
+      if (decision.kind === "new-root") {
+        const category = [...extractHashtags(status), "Micro"];
+        if (DRY_RUN) {
+          console.log("  [dry-run] would create post:", JSON.stringify({ content, photos, category, published: status.created_at }, null, 2));
+          threadsWorking[status.id] = `dry-run://${status.id}`;
+        } else {
+          const pikaUrl = await createPost(pikaConfig, {
+            content,
+            photos,
+            category,
+            published: status.created_at,
+          });
+          threadsWorking[status.id] = pikaUrl;
+          console.log(`  created ${pikaUrl}`);
+        }
       } else {
-        const pikaUrl = await createPost(pikaConfig, {
-          content,
-          photos,
-          category,
-          published: status.created_at,
-        });
-        threadsWorking[status.id] = pikaUrl;
-        console.log(`  created ${pikaUrl}`);
+        const pikaUrl = decision.pikaUrl;
+        if (DRY_RUN) {
+          console.log(`  [dry-run] would fetch source of ${pikaUrl}, append content, and update`);
+          threadsWorking[status.id] = pikaUrl;
+        } else {
+          const source = await getSource(pikaConfig, pikaUrl);
+          const existingContent = source.content?.[0] ?? "";
+          const existingPhotos = normalizePhotos(source.photo);
+          const mergedContent = existingContent ? `${existingContent}\n\n${content}` : content;
+          const mergedPhotos = [...existingPhotos, ...photos];
+          await updatePost(pikaConfig, pikaUrl, { content: mergedContent, photos: mergedPhotos });
+          threadsWorking[status.id] = pikaUrl;
+          console.log(`  updated ${pikaUrl}`);
+        }
       }
-    } else {
-      const pikaUrl = decision.pikaUrl;
-      if (DRY_RUN) {
-        console.log(`  [dry-run] would fetch source of ${pikaUrl}, append content, and update`);
-        threadsWorking[status.id] = pikaUrl;
-      } else {
-        const source = await getSource(pikaConfig, pikaUrl);
-        const existingContent = source.content?.[0] ?? "";
-        const existingPhotos = normalizePhotos(source.photo);
-        const mergedContent = existingContent ? `${existingContent}\n\n${content}` : content;
-        const mergedPhotos = [...existingPhotos, ...photos];
-        await updatePost(pikaConfig, pikaUrl, { content: mergedContent, photos: mergedPhotos });
-        threadsWorking[status.id] = pikaUrl;
-        console.log(`  updated ${pikaUrl}`);
-      }
+    } catch (err) {
+      console.error(`  ! failed to process status ${status.id}:`, err);
+      hadFailure = true;
+      break;
     }
 
     lastProcessedId = status.id;
@@ -212,6 +225,13 @@ async function main() {
     await saveState(kvConfig, { lastProcessedId, threads: threadsWorking });
   } else {
     console.log("[dry-run] state not written.");
+  }
+
+  if (hadFailure) {
+    // Progress up to the failure is already saved above; this only marks
+    // the run as failed in GitHub Actions for visibility. The failed
+    // status wasn't advanced past, so it's retried automatically next run.
+    process.exitCode = 1;
   }
 }
 
