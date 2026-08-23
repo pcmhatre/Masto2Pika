@@ -16,11 +16,19 @@ export async function loadState(config: KvConfig): Promise<ThreadState> {
   const res = await fetch(valueUrl(config, STATE_KEY), {
     headers: { Authorization: `Bearer ${config.apiToken}` },
   });
-  if (res.status === 404) return { lastProcessedId: null, threads: {} };
+  if (res.status === 404) return { lastProcessedId: null, threads: {}, pending: {}, pendingThreads: {} };
   if (!res.ok) {
     throw new Error(`Cloudflare KV read failed: ${res.status} ${await res.text()}`);
   }
-  return JSON.parse(await res.text()) as ThreadState;
+  // `pending`/`pendingThreads` are newer fields — default them for state
+  // blobs written before pending-thread support existed.
+  const raw = JSON.parse(await res.text()) as Partial<ThreadState>;
+  return {
+    lastProcessedId: raw.lastProcessedId ?? null,
+    threads: raw.threads ?? {},
+    pending: raw.pending ?? {},
+    pendingThreads: raw.pendingThreads ?? {},
+  };
 }
 
 export async function saveState(config: KvConfig, state: ThreadState): Promise<void> {

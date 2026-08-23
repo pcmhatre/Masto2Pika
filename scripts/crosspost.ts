@@ -3,17 +3,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { fetchNewStatuses, type MastodonConfig, type MastodonStatus } from "../src/mastodon.js";
-import { buildContentMarkdown, extractHashtags } from "../src/htmlToMarkdown.js";
+import { buildContentMarkdown, buildPhotoMarkdown, extractHashtags } from "../src/htmlToMarkdown.js";
 import {
   createPost,
   getSource,
-  normalizePhotos,
   updatePost,
   uploadMedia,
   type PikaConfig,
   type PikaPhoto,
 } from "../src/pika.js";
-import { classify } from "../src/threading.js";
+import { classify, plainTextLength, sweepExpiredPending, type PendingThread } from "../src/threading.js";
 import { loadState, saveState, type KvConfig } from "../src/state.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -85,14 +84,17 @@ async function peekLatestStatusId(config: MastodonConfig): Promise<string | unde
   return page[0]?.id;
 }
 
+// Matches Pika's documented media endpoint formats exactly: "The media
+// endpoint accepts JPEG, PNG, GIF, and WebP files." — notably not AVIF,
+// which some Mastodon instances/clients produce for HEIC-sourced photos.
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
   png: "image/png",
   gif: "image/gif",
   webp: "image/webp",
-  avif: "image/avif",
 };
+const SUPPORTED_PIKA_IMAGE_TYPES = new Set(Object.values(IMAGE_MIME_BY_EXT));
 
 // Pika's Micropub endpoint rejects the entire post with a misleading 422
 // "Body can't be blank" whenever a photo's alt text contains a literal `"`
@@ -130,6 +132,14 @@ async function uploadStatusImages(status: MastodonStatus): Promise<PikaPhoto[]> 
       console.warn(`  ! skipping non-image "unknown" attachment ${media.url} (${contentType})`);
       continue;
     }
+    // Pika's media endpoint only accepts JPEG/PNG/GIF/WebP — anything else
+    // (e.g. AVIF) would be rejected outright. Skip it here rather than let
+    // the upload fail inside the per-status try/catch, which would block
+    // this status (and everything after it) from ever advancing.
+    if (!SUPPORTED_PIKA_IMAGE_TYPES.has(contentType)) {
+      console.warn(`  ! skipping unsupported image format ${media.url} (${contentType}); Pika only accepts JPEG/PNG/GIF/WebP`);
+      continue;
+    }
     const bytes = Buffer.from(await res.arrayBuffer());
     const ext = Object.entries(IMAGE_MIME_BY_EXT).find(([, mime]) => mime === contentType)?.[0] ?? "jpg";
     const filename = `${media.id}.${ext}`;
@@ -155,7 +165,7 @@ async function main() {
   if (state.lastProcessedId === null && !BACKFILL) {
     const latestId = await peekLatestStatusId(mastodonConfig);
     if (!DRY_RUN) {
-      await saveState(kvConfig, { lastProcessedId: latestId ?? "0", threads: {} });
+      await saveState(kvConfig, { lastProcessedId: latestId ?? "0", threads: {}, pending: {}, pendingThreads: {} });
     }
     console.log(
       `First run: initialized cursor to status ${latestId ?? "(none)"} without backfilling. ` +
@@ -173,11 +183,29 @@ async function main() {
   }
 
   const threadsWorking: Record<string, string> = { ...state.threads };
+
+  const swept = sweepExpiredPending(state.pending, state.pendingThreads);
+  for (const rootId of swept.expired) {
+    console.log(
+      `Pending thread ${rootId} expired after 24h without reaching ${minContentLength} characters — dropped.`,
+    );
+  }
+  const pendingWorking: Record<string, string> = swept.pending;
+  const pendingThreadsWorking: Record<string, PendingThread> = swept.pendingThreads;
+
   let lastProcessedId = state.lastProcessedId;
   let hadFailure = false;
 
   for (const status of statuses) {
-    const decision = classify(status, mastodonConfig.accountId, threadsWorking, excludedContent, minContentLength);
+    const decision = classify(
+      status,
+      mastodonConfig.accountId,
+      threadsWorking,
+      pendingWorking,
+      pendingThreadsWorking,
+      excludedContent,
+      minContentLength,
+    );
     console.log(`Status ${status.id}: ${decision.kind}${"reason" in decision ? ` (${decision.reason})` : ""}`);
 
     if (decision.kind === "skip") {
@@ -192,6 +220,77 @@ async function main() {
     // lastProcessedId isn't advanced past the failed status, it's simply
     // retried on the next run, which is correct for a transient failure.
     try {
+      if (decision.kind === "pending-start") {
+        const content = buildContentMarkdown(status);
+        const thread: PendingThread = {
+          createdAt: status.created_at,
+          statusIds: [status.id],
+          contentParts: [content],
+          photos: [],
+          hashtags: extractHashtags(status),
+          plainLength: plainTextLength(status.content),
+        };
+        pendingThreadsWorking[status.id] = thread;
+        pendingWorking[status.id] = status.id;
+        console.log(
+          `  holding as pending (${thread.plainLength}/${minContentLength} chars), waiting up to 24h for a reply`,
+        );
+        lastProcessedId = status.id;
+        continue;
+      }
+
+      if (decision.kind === "pending-continue") {
+        const photos = await uploadStatusImages(status);
+        const content = buildContentMarkdown(status);
+        // Invariant: classify() only returns "pending-continue" for a rootId
+        // that's still present in pendingThreadsWorking.
+        const prior = pendingThreadsWorking[decision.rootId]!;
+        const merged: PendingThread = {
+          createdAt: prior.createdAt,
+          statusIds: [...prior.statusIds, status.id],
+          contentParts: [...prior.contentParts, content],
+          photos: [...prior.photos, ...photos],
+          hashtags: [...prior.hashtags, ...extractHashtags(status)],
+          plainLength: prior.plainLength + plainTextLength(status.content),
+        };
+
+        if (decision.publishNow) {
+          const category = [...new Set(merged.hashtags), "Micro"];
+          const combinedContent = merged.contentParts.join("\n\n");
+          if (DRY_RUN) {
+            console.log(
+              "  [dry-run] would publish pending thread as one post:",
+              JSON.stringify(
+                { content: combinedContent, photos: merged.photos, category, published: merged.createdAt },
+                null,
+                2,
+              ),
+            );
+            for (const id of merged.statusIds) threadsWorking[id] = `dry-run://${decision.rootId}`;
+          } else {
+            const pikaUrl = await createPost(pikaConfig, {
+              content: combinedContent,
+              photos: merged.photos,
+              category,
+              published: merged.createdAt,
+            });
+            for (const id of merged.statusIds) threadsWorking[id] = pikaUrl;
+            console.log(
+              `  published pending thread (${merged.statusIds.length} toots, ${merged.plainLength} chars) as ${pikaUrl}`,
+            );
+          }
+          delete pendingThreadsWorking[decision.rootId];
+          for (const id of merged.statusIds) delete pendingWorking[id];
+        } else {
+          pendingThreadsWorking[decision.rootId] = merged;
+          pendingWorking[status.id] = decision.rootId;
+          console.log(`  still pending (${merged.plainLength}/${minContentLength} chars across ${merged.statusIds.length} toots)`);
+        }
+
+        lastProcessedId = status.id;
+        continue;
+      }
+
       const photos = await uploadStatusImages(status);
       const content = buildContentMarkdown(status);
 
@@ -218,10 +317,10 @@ async function main() {
         } else {
           const source = await getSource(pikaConfig, pikaUrl);
           const existingContent = source.content?.[0] ?? "";
-          const existingPhotos = normalizePhotos(source.photo);
-          const mergedContent = existingContent ? `${existingContent}\n\n${content}` : content;
-          const mergedPhotos = [...existingPhotos, ...photos];
-          await updatePost(pikaConfig, pikaUrl, { content: mergedContent, photos: mergedPhotos });
+          const photoMarkdown = buildPhotoMarkdown(photos);
+          const contentWithPhotos = photoMarkdown ? `${content}\n\n${photoMarkdown}` : content;
+          const mergedContent = existingContent ? `${existingContent}\n\n${contentWithPhotos}` : contentWithPhotos;
+          await updatePost(pikaConfig, pikaUrl, { content: mergedContent, addCategory: extractHashtags(status) });
           threadsWorking[status.id] = pikaUrl;
           console.log(`  updated ${pikaUrl}`);
         }
@@ -236,7 +335,12 @@ async function main() {
   }
 
   if (!DRY_RUN) {
-    await saveState(kvConfig, { lastProcessedId, threads: threadsWorking });
+    await saveState(kvConfig, {
+      lastProcessedId,
+      threads: threadsWorking,
+      pending: pendingWorking,
+      pendingThreads: pendingThreadsWorking,
+    });
   } else {
     console.log("[dry-run] state not written.");
   }

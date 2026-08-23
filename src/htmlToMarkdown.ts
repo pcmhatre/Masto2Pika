@@ -1,5 +1,6 @@
 import TurndownService from "turndown";
 import type { MastodonQuote, MastodonStatus } from "./mastodon.js";
+import type { PikaPhoto } from "./pika.js";
 
 const turndown = new TurndownService({
   headingStyle: "atx",
@@ -29,6 +30,15 @@ export function htmlToMarkdown(html: string): string {
 
 export function extractHashtags(status: MastodonStatus): string[] {
   return status.tags.map((t) => t.name);
+}
+
+// Pika's Micropub `action: update` silently no-ops on a `photo` replace (see
+// PROJECT_STATE.md's known Pika bugs) — `content` updates are the one thing
+// confirmed to work reliably through that endpoint, so a continuation's
+// photos are embedded as markdown images directly in the appended content
+// instead of being sent as a separate `photo` property.
+export function buildPhotoMarkdown(photos: PikaPhoto[]): string {
+  return photos.map((p) => `![${p.alt ?? ""}](${p.value})`).join("\n\n");
 }
 
 export function buildContentMarkdown(status: MastodonStatus): string {
