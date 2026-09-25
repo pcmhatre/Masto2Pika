@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fetchContextDescendants, fetchNewStatuses, type MastodonConfig, type MastodonStatus } from "../src/mastodon.js";
+import { fetchNewStatuses, type MastodonConfig, type MastodonStatus } from "../src/mastodon.js";
 import { buildContentMarkdown, buildPhotoMarkdown, extractHashtags } from "../src/htmlToMarkdown.js";
 import {
   createPost,
@@ -12,7 +12,7 @@ import {
   type PikaConfig,
   type PikaPhoto,
 } from "../src/pika.js";
-import { classify, plainTextLength, sweepExpiredPending, type PendingThread } from "../src/threading.js";
+import { classify } from "../src/threading.js";
 import { loadState, saveState, type KvConfig } from "../src/state.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -159,72 +159,13 @@ async function uploadStatusImages(status: MastodonStatus): Promise<PikaPhoto[]> 
   return photos;
 }
 
-// Folds one more status into a pending thread, publishing it as a single
-// combined post if that pushes the total past minContentLength. Shared by
-// both the normal poll-driven "pending-continue" path and the context-based
-// recovery sweep below, since both need identical merge/publish behavior.
-async function mergeIntoPendingThread(
-  rootId: string,
-  status: MastodonStatus,
-  pendingThreadsWorking: Record<string, PendingThread>,
-  pendingWorking: Record<string, string>,
-  threadsWorking: Record<string, string>,
-): Promise<void> {
-  const photos = await uploadStatusImages(status);
-  const content = buildContentMarkdown(status);
-  const prior = pendingThreadsWorking[rootId];
-  if (!prior) throw new Error(`mergeIntoPendingThread: no pending thread for root ${rootId}`);
-
-  const merged: PendingThread = {
-    createdAt: prior.createdAt,
-    statusIds: [...prior.statusIds, status.id],
-    contentParts: [...prior.contentParts, content],
-    photos: [...prior.photos, ...photos],
-    hashtags: [...prior.hashtags, ...extractHashtags(status)],
-    plainLength: prior.plainLength + plainTextLength(status.content),
-  };
-
-  if (merged.plainLength > minContentLength) {
-    const category = [...new Set(merged.hashtags), "Micro"];
-    const combinedContent = merged.contentParts.join("\n\n");
-    if (DRY_RUN) {
-      console.log(
-        "  [dry-run] would publish pending thread as one post:",
-        JSON.stringify(
-          { content: combinedContent, photos: merged.photos, category, published: merged.createdAt },
-          null,
-          2,
-        ),
-      );
-      for (const id of merged.statusIds) threadsWorking[id] = `dry-run://${rootId}`;
-    } else {
-      const pikaUrl = await createPost(pikaConfig, {
-        content: combinedContent,
-        photos: merged.photos,
-        category,
-        published: merged.createdAt,
-      });
-      for (const id of merged.statusIds) threadsWorking[id] = pikaUrl;
-      console.log(
-        `  published pending thread (${merged.statusIds.length} toots, ${merged.plainLength} chars) as ${pikaUrl}`,
-      );
-    }
-    delete pendingThreadsWorking[rootId];
-    for (const id of merged.statusIds) delete pendingWorking[id];
-  } else {
-    pendingThreadsWorking[rootId] = merged;
-    pendingWorking[status.id] = rootId;
-    console.log(`  still pending (${merged.plainLength}/${minContentLength} chars across ${merged.statusIds.length} toots)`);
-  }
-}
-
 async function main() {
   const state = await loadState(kvConfig);
 
   if (state.lastProcessedId === null && !BACKFILL) {
     const latestId = await peekLatestStatusId(mastodonConfig);
     if (!DRY_RUN) {
-      await saveState(kvConfig, { lastProcessedId: latestId ?? "0", threads: {}, pending: {}, pendingThreads: {} });
+      await saveState(kvConfig, { lastProcessedId: latestId ?? "0", threads: {} });
     }
     console.log(
       `First run: initialized cursor to status ${latestId ?? "(none)"} without backfilling. ` +
@@ -233,89 +174,20 @@ async function main() {
     return;
   }
 
-  const threadsWorking: Record<string, string> = { ...state.threads };
-
-  const swept = sweepExpiredPending(state.pending, state.pendingThreads);
-  for (const rootId of swept.expired) {
-    console.log(
-      `Pending thread ${rootId} expired after 24h without reaching ${minContentLength} characters — dropped.`,
-    );
-  }
-  const pendingWorking: Record<string, string> = swept.pending;
-  const pendingThreadsWorking: Record<string, PendingThread> = swept.pendingThreads;
-
-  let hadFailure = false;
-
-  // fetchNewStatuses (the account-statuses-list poll) can permanently miss a
-  // self-reply that hasn't propagated to that endpoint yet by the time a
-  // later run advances the cursor past it (see fetchContextDescendants doc
-  // comment). For every still-pending thread — the case where a missed
-  // reply means the *whole toot* silently never gets crossposted, not just
-  // one reply failing to append to an already-published post — check its
-  // context directly rather than rely solely on the poll below. Scoped to
-  // pending threads only (small, bounded set) rather than every historical
-  // thread, since checking all of those every run would multiply this
-  // script's Mastodon API calls for a much lower-stakes failure mode (a
-  // published post missing one reply, not a toot vanishing entirely).
-  for (const rootId of Object.keys(pendingThreadsWorking)) {
-    let descendants: MastodonStatus[];
-    try {
-      descendants = await fetchContextDescendants(mastodonConfig, rootId);
-    } catch (err) {
-      console.error(`  ! failed to check context for pending thread ${rootId}:`, err);
-      hadFailure = true;
-      continue;
-    }
-
-    const thread = pendingThreadsWorking[rootId];
-    if (!thread) continue;
-    const known = new Set(thread.statusIds);
-    const missed = descendants
-      .filter((d) => d.account?.id === mastodonConfig.accountId && d.in_reply_to_account_id === mastodonConfig.accountId)
-      .filter((d) => !known.has(d.id))
-      .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
-
-    for (const status of missed) {
-      console.log(`Status ${status.id}: pending-continue (recovered via context check for thread ${rootId})`);
-      try {
-        await mergeIntoPendingThread(rootId, status, pendingThreadsWorking, pendingWorking, threadsWorking);
-      } catch (err) {
-        console.error(`  ! failed to process recovered status ${status.id}:`, err);
-        hadFailure = true;
-        break;
-      }
-      if (!pendingThreadsWorking[rootId]) break; // thread published; nothing left to merge into it
-    }
-  }
-
   const minId = state.lastProcessedId ?? undefined;
   const statuses = await fetchNewStatuses(mastodonConfig, minId);
 
-  let lastProcessedId = state.lastProcessedId;
-
   if (statuses.length === 0) {
     console.log("No new statuses.");
+    return;
   }
 
-  for (const status of statuses) {
-    // Already folded in by the context-recovery sweep above (as a thread
-    // root/reply, published or still pending) — reprocessing it here would
-    // duplicate its content into whatever post it already landed in.
-    if (threadsWorking[status.id] || pendingWorking[status.id]) {
-      console.log(`Status ${status.id}: already handled by context-recovery sweep — skipping`);
-      lastProcessedId = status.id;
-      continue;
-    }
+  const threadsWorking: Record<string, string> = { ...state.threads };
+  let lastProcessedId = state.lastProcessedId;
+  let hadFailure = false;
 
-    const decision = classify(
-      status,
-      mastodonConfig.accountId,
-      threadsWorking,
-      pendingWorking,
-      pendingThreadsWorking,
-      excludedContent,
-      minContentLength,
-    );
+  for (const status of statuses) {
+    const decision = classify(status, mastodonConfig.accountId, threadsWorking, excludedContent, minContentLength);
     console.log(`Status ${status.id}: ${decision.kind}${"reason" in decision ? ` (${decision.reason})` : ""}`);
 
     if (decision.kind === "skip") {
@@ -330,31 +202,6 @@ async function main() {
     // lastProcessedId isn't advanced past the failed status, it's simply
     // retried on the next run, which is correct for a transient failure.
     try {
-      if (decision.kind === "pending-start") {
-        const content = buildContentMarkdown(status);
-        const thread: PendingThread = {
-          createdAt: status.created_at,
-          statusIds: [status.id],
-          contentParts: [content],
-          photos: [],
-          hashtags: extractHashtags(status),
-          plainLength: plainTextLength(status.content),
-        };
-        pendingThreadsWorking[status.id] = thread;
-        pendingWorking[status.id] = status.id;
-        console.log(
-          `  holding as pending (${thread.plainLength}/${minContentLength} chars), waiting up to 24h for a reply`,
-        );
-        lastProcessedId = status.id;
-        continue;
-      }
-
-      if (decision.kind === "pending-continue") {
-        await mergeIntoPendingThread(decision.rootId, status, pendingThreadsWorking, pendingWorking, threadsWorking);
-        lastProcessedId = status.id;
-        continue;
-      }
-
       const photos = await uploadStatusImages(status);
       const content = buildContentMarkdown(status);
 
@@ -399,12 +246,7 @@ async function main() {
   }
 
   if (!DRY_RUN) {
-    await saveState(kvConfig, {
-      lastProcessedId,
-      threads: threadsWorking,
-      pending: pendingWorking,
-      pendingThreads: pendingThreadsWorking,
-    });
+    await saveState(kvConfig, { lastProcessedId, threads: threadsWorking });
   } else {
     console.log("[dry-run] state not written.");
   }

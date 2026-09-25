@@ -36,11 +36,6 @@ export interface MastodonStatus {
   media_attachments: MastodonMediaAttachment[];
   tags: { name: string }[];
   quote?: MastodonQuote | null;
-  // Only populated (and only needed) for statuses fetched via context/
-  // descendants, where — unlike the account statuses list — results aren't
-  // all authored by the account we're polling, so self-authorship can't be
-  // assumed from the endpoint alone.
-  account?: { id: string };
 }
 
 export interface MastodonConfig {
@@ -124,32 +119,4 @@ export async function fetchNewStatuses(
   }
 
   return collected.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
-}
-
-/**
- * Fetches every reply in a status's thread (any depth, any author) via
- * Mastodon's context endpoint. This exists as a fallback for self-replies
- * that the account-statuses-list poll (fetchNewStatuses) can silently and
- * *permanently* miss: that endpoint doesn't reliably surface a reply
- * immediately relative to its id (observed 16+ minute lags on a
- * followers-only account, likely from slower audience/visibility
- * resolution), and since fetchNewStatuses advances an exclusive min_id
- * cursor, any status still "invisible" there when a later run processes a
- * higher-id status becomes unfetchable through that path forever. The
- * context endpoint, queried directly by status id, did not show the same
- * staleness in testing.
- */
-export async function fetchContextDescendants(
-  config: MastodonConfig,
-  statusId: string,
-): Promise<MastodonStatus[]> {
-  const base = config.instanceUrl.replace(/\/+$/, "");
-  const res = await fetch(`${base}/api/v1/statuses/${statusId}/context`, {
-    headers: { Authorization: `Bearer ${config.accessToken}` },
-  });
-  if (!res.ok) {
-    throw new Error(`Mastodon context fetch failed: ${res.status} ${await res.text()}`);
-  }
-  const body = (await res.json()) as { descendants: MastodonStatus[] };
-  return body.descendants;
 }
