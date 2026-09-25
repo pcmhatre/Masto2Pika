@@ -220,6 +220,7 @@ async function mergeIntoPendingThread(
 
 async function main() {
   const state = await loadState(kvConfig);
+  console.log(`DEBUG: loaded state — pendingThreads keys: ${JSON.stringify(Object.keys(state.pendingThreads))}`);
 
   if (state.lastProcessedId === null && !BACKFILL) {
     const latestId = await peekLatestStatusId(mastodonConfig);
