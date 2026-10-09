@@ -52,9 +52,21 @@ async function fetchPage(
   params: URLSearchParams,
 ): Promise<MastodonStatus[]> {
   const url = `${base}/api/v1/accounts/${config.accountId}/statuses?${params}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${config.accessToken}` },
-  });
+  // GitHub runners intermittently fail to connect to the instance (ETIMEDOUT);
+  // this is a read-only GET, so retrying is safe.
+  const delaysMs = [3000, 8000, 15000];
+  let res: Response | undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch(url, { headers: { Authorization: `Bearer ${config.accessToken}` } });
+      break;
+    } catch (err) {
+      const delay = delaysMs[attempt];
+      if (delay === undefined) throw err;
+      console.warn(`  ! Mastodon fetch failed (attempt ${attempt + 1}), retrying in ${delay / 1000}s`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
   if (!res.ok) {
     throw new Error(`Mastodon statuses fetch failed: ${res.status} ${await res.text()}`);
   }
