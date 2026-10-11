@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fetchNewStatuses, type MastodonConfig, type MastodonStatus } from "../src/mastodon.js";
+import { fetchNewStatuses, MastodonUnreachableError, type MastodonConfig, type MastodonStatus } from "../src/mastodon.js";
 import { buildContentMarkdown, buildPhotoMarkdown, extractHashtags } from "../src/htmlToMarkdown.js";
 import {
   createPost,
@@ -260,6 +260,14 @@ async function main() {
 }
 
 main().catch((err) => {
+  // Runners intermittently can't reach the instance. Nothing has been written
+  // at this point (state is only saved after fetching), so the next run simply
+  // catches up — exit cleanly instead of sending a failure email. Every other
+  // error still fails the run.
+  if (err instanceof MastodonUnreachableError) {
+    console.warn(`::warning::${err.message}; skipping this run, the next one will catch up.`);
+    return;
+  }
   console.error(err);
   process.exitCode = 1;
 });

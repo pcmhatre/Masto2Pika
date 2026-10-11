@@ -46,6 +46,14 @@ export interface MastodonConfig {
 
 const PAGE_LIMIT = 40;
 
+/** Connection to the instance timed out on every attempt. */
+export class MastodonUnreachableError extends Error {}
+
+function isConnectTimeout(err: unknown): boolean {
+  const cause = (err as { cause?: { code?: string } } | undefined)?.cause;
+  return cause?.code === "ETIMEDOUT" || cause?.code === "UND_ERR_CONNECT_TIMEOUT";
+}
+
 async function fetchPage(
   base: string,
   config: MastodonConfig,
@@ -62,7 +70,12 @@ async function fetchPage(
       break;
     } catch (err) {
       const delay = delaysMs[attempt];
-      if (delay === undefined) throw err;
+      if (delay === undefined) {
+        if (isConnectTimeout(err)) {
+          throw new MastodonUnreachableError("Could not connect to the Mastodon instance (timed out)");
+        }
+        throw err;
+      }
       console.warn(`  ! Mastodon fetch failed (attempt ${attempt + 1}), retrying in ${delay / 1000}s`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
